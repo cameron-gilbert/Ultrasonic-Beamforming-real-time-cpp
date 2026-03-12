@@ -327,7 +327,12 @@ MainWindow::MainWindow(QWidget *parent)
     paramForm->addRow("Elevation (°):", recordElSpinBox);
     
     QLineEdit *saveDirEdit = new QLineEdit();
-    saveDirEdit->setText("C:/Users/Cam/AX7010_Work/UltrasonicHost/recordings");
+    {
+        // Resolve recordings/ relative to the project root (2 levels above the build output)
+        QDir d(QCoreApplication::applicationDirPath());
+        d.cdUp(); d.cdUp();
+        saveDirEdit->setText(d.filePath("recordings"));
+    }
     saveDirEdit->setObjectName("saveDirLineEdit");
     QPushButton *browseDirButton = new QPushButton("Browse...");
     QHBoxLayout *dirLayout = new QHBoxLayout();
