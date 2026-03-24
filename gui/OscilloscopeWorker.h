@@ -33,4 +33,8 @@ private:
     int   m_scale        = 0;
     int   m_frameSkip    = 1;   // render every Nth frame (1 = all frames)
     int   m_frameCounter = 0;
+
+    // Heatmap display scaling — mutable so renderHeatmap can update them while staying logically const
+    mutable float m_noiseFloor      = 0.0f;  // EMA of mean power; represents ambient noise level
+    mutable float m_displayCeiling  = 0.0f;  // slow-decaying peak; snaps up instantly on strong signal
 };

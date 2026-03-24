@@ -10,6 +10,9 @@
 #include "../model/BeamformingCalculator.h"
 #include "../storage/DataRecorder.h"
 #include "../model/BeamformerWorker.h"
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+#include "../model/BeamformerWorkerCUDA.h"
+#endif
 #include "../audio/AudioOutput.h"
 #include <QPlainTextEdit>
 #include <QFileDialog>
@@ -82,6 +85,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_beamformerThread = new QThread(this);
     m_beamformerWorker = new BeamformerWorker();
     m_beamformerWorker->moveToThread(m_beamformerThread);
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+    m_beamformerWorkerCUDA = new BeamformerWorkerCUDA();
+    m_beamformerWorkerCUDA->moveToThread(m_beamformerThread);
+    // Default to CUDA if available
+    m_useCuda = m_beamformerWorkerCUDA->cudaAvailable();
+#endif
     m_beamformerThread->start();
 
     // populating microphone selector 
@@ -94,12 +103,18 @@ MainWindow::MainWindow(QWidget *parent)
     
     // Position mic combobox dynamically in top-right corner
     auto positionComboBox = [this]() {
-        const int width = ui->oscilloscopeWidget->width();
-        const int right = width - 10;
+        const int width  = ui->oscilloscopeWidget->width();
+        const int height = ui->oscilloscopeWidget->height();
+        const int right  = width - 10;
         ui->micComboBox->move(right - ui->micComboBox->width(), 5);
         QSpinBox *fpsSpin = ui->oscilloscopeWidget->findChild<QSpinBox*>("oscFpsSpinBox");
         if (fpsSpin)
             fpsSpin->move(right - fpsSpin->width(), 5 + ui->micComboBox->height() + 2);
+        QWidget *scanW = ui->oscilloscopeWidget->findChild<QWidget*>("scanIntervalWidget");
+        if (scanW) {
+            scanW->adjustSize();
+            scanW->move(5, height - scanW->height() - 5);
+        }
     };
     
     // Install event filter to reposition on resize
@@ -108,13 +123,25 @@ MainWindow::MainWindow(QWidget *parent)
     // Initial positioning
     QTimer::singleShot(0, positionComboBox);
 
-    // Use source directory for geometry file (relative to executable during development)
-    // In production, you may want to deploy Book1.csv with the executable
-    // microphoneLocations.csv is 2 levels up from the executable (UltrasonicHost/ root)
-    QDir dir(QCoreApplication::applicationDirPath());
-    dir.cdUp();
-    dir.cdUp();
-    const QString geoPath = dir.filePath("microphoneLocations.csv");
+    // Search for microphoneLocations.csv — try compile-time source dir first,
+    // then walk up from the executable for deployed builds.
+    QStringList candidatePaths;
+#ifdef APP_SOURCE_DIR
+    candidatePaths << QString(APP_SOURCE_DIR) + "/microphoneLocations.csv";
+#endif
+    {
+        QDir d(QCoreApplication::applicationDirPath());
+        for (int i = 0; i <= 4; ++i) {
+            candidatePaths << d.filePath("microphoneLocations.csv");
+            d.cdUp();
+        }
+    }
+    QString geoPath;
+    for (const QString &c : candidatePaths) {
+        if (QFile::exists(c)) { geoPath = c; break; }
+    }
+    if (geoPath.isEmpty())
+        geoPath = candidatePaths.first(); // will fail gracefully with a clear error
     ui->logTextEdit->appendPlainText(QString("📂 Loading geometry from: %1").arg(geoPath));
 
     if (loadGeometry(geoPath)) {
@@ -150,6 +177,15 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onScanComplete, Qt::QueuedConnection);
     connect(this, &MainWindow::frameReady,
             m_beamformerWorker, &BeamformerWorker::processBlock);
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+    // Wire initial active worker (CUDA if available, else CPU default above stands)
+    if (m_useCuda && m_beamformerWorkerCUDA) {
+        disconnect(this, &MainWindow::frameReady,
+                   m_beamformerWorker, &BeamformerWorker::processBlock);
+        connect(this, &MainWindow::frameReady,
+                m_beamformerWorkerCUDA, &BeamformerWorkerCUDA::processBlock);
+    }
+#endif
 
     // Setup oscilloscope worker thread
     m_oscThread = new QThread(this);
@@ -169,13 +205,23 @@ MainWindow::MainWindow(QWidget *parent)
     // Qt will auto-queue across the thread boundary.
     connect(m_beamformerWorker, &BeamformerWorker::scanComplete,
             m_oscWorker, &OscilloscopeWorker::onNewHeatmap);
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+    connect(m_beamformerWorkerCUDA, &BeamformerWorkerCUDA::scanComplete,
+            m_oscWorker, &OscilloscopeWorker::onNewHeatmap);
+    connect(m_beamformerWorkerCUDA, &BeamformerWorkerCUDA::scanComplete,
+            this, &MainWindow::onScanComplete, Qt::QueuedConnection);
+    connect(m_beamformerWorkerCUDA, &BeamformerWorkerCUDA::logMessage,
+            this, [this](const QString &msg) {
+                ui->logTextEdit->appendPlainText(msg);
+            }, Qt::QueuedConnection);
+#endif
 
     // FPS spinbox — floats over top-right of oscilloscope widget, below mic combobox
     {
         QSpinBox *fpsSpin = new QSpinBox(ui->oscilloscopeWidget);
         fpsSpin->setRange(1, 94);
         fpsSpin->setValue(94);
-        fpsSpin->setFixedWidth(65);
+        fpsSpin->setFixedWidth(80);
         fpsSpin->setToolTip("Oscilloscope display FPS");
         fpsSpin->setObjectName("oscFpsSpinBox");
         fpsSpin->show();
@@ -191,50 +237,50 @@ MainWindow::MainWindow(QWidget *parent)
         scanLay->setContentsMargins(4, 2, 4, 2);
         scanLay->setSpacing(4);
 
-        auto makeLabel = [](const QString &text) {
-            QLabel *l = new QLabel(text);
-            l->setStyleSheet("color: white; background: transparent;");
+        auto makeLabel = [scanWidget](const QString &text) {
+            QLabel *l = new QLabel(text, scanWidget);
+            l->setStyleSheet("color: white;");
             return l;
         };
 
-        QDoubleSpinBox *scanSpin = new QDoubleSpinBox();
+        QDoubleSpinBox *scanSpin = new QDoubleSpinBox(scanWidget);
         scanSpin->setObjectName("scanIntervalSpinBox");
         scanSpin->setRange(0.001, 10.0);
         scanSpin->setSingleStep(0.1);
         scanSpin->setDecimals(3);
         scanSpin->setValue(0.001);
         scanSpin->setSuffix(" s");
-        scanSpin->setFixedWidth(75);
+        scanSpin->setFixedWidth(105);
         scanSpin->setToolTip("Minimum time between beamforming scans");
 
-        QDoubleSpinBox *sosSpin = new QDoubleSpinBox();
+        QDoubleSpinBox *sosSpin = new QDoubleSpinBox(scanWidget);
         sosSpin->setObjectName("speedOfSoundSpinBox");
         sosSpin->setRange(300.0, 400.0);
         sosSpin->setSingleStep(1.0);
         sosSpin->setDecimals(1);
         sosSpin->setValue(343.0);
         sosSpin->setSuffix(" m/s");
-        sosSpin->setFixedWidth(90);
+        sosSpin->setFixedWidth(95);
         sosSpin->setToolTip("Speed of sound used for beamforming delay calculation");
 
-        scanLay->addWidget(makeLabel("Scan interval:"));
-        scanLay->addWidget(scanSpin);
-        scanLay->addSpacing(8);
-        scanLay->addWidget(makeLabel("Speed of sound:"));
-        scanLay->addWidget(sosSpin);
-        scanLay->addSpacing(8);
-
-        QDoubleSpinBox *gridResSpin = new QDoubleSpinBox();
+        QDoubleSpinBox *gridResSpin = new QDoubleSpinBox(scanWidget);
         gridResSpin->setObjectName("gridResSpinBox");
-        gridResSpin->setRange(0.02, 0.5);
-        gridResSpin->setSingleStep(0.02);
-        gridResSpin->setDecimals(2);
+        gridResSpin->setRange(0.001, 0.5);
+        gridResSpin->setSingleStep(0.01);
+        gridResSpin->setDecimals(3);
         gridResSpin->setValue(0.05);
-        gridResSpin->setFixedWidth(70);
+        gridResSpin->setFixedWidth(90);
         gridResSpin->setToolTip("Beamforming grid resolution (normalised units)");
 
+        scanLay->addWidget(makeLabel("Scan:"));
+        scanLay->addWidget(scanSpin);
+        scanLay->addSpacing(6);
+        scanLay->addWidget(makeLabel("SoS:"));
+        scanLay->addWidget(sosSpin);
+        scanLay->addSpacing(6);
         scanLay->addWidget(makeLabel("Grid res:"));
         scanLay->addWidget(gridResSpin);
+
         scanWidget->adjustSize();
         scanWidget->show();
 
@@ -250,10 +296,18 @@ MainWindow::MainWindow(QWidget *parent)
         connect(sosSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, [this](double val) {
                     m_beamformerWorker->setSpeedOfSound(static_cast<float>(val));
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+                    if (m_beamformerWorkerCUDA)
+                        m_beamformerWorkerCUDA->setSpeedOfSound(static_cast<float>(val));
+#endif
                 });
         connect(gridResSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, [this](double val) {
                     m_beamformerWorker->setGridRes(static_cast<float>(val));
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+                    if (m_beamformerWorkerCUDA)
+                        m_beamformerWorkerCUDA->setGridRes(static_cast<float>(val));
+#endif
                 });
     }
 
@@ -272,6 +326,14 @@ MainWindow::MainWindow(QWidget *parent)
     // This ensures member variables match UI state at startup
     toggleAudio(ui->enableAudioCheckbox->isChecked());
     toggleBeamforming(ui->enableBeamformingCheckbox->isChecked());
+
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+    ui->logTextEdit->appendPlainText(m_useCuda
+        ? "[CUDA] Built with CUDA support — GPU beamformer active"
+        : "[CUDA] Built with CUDA support — no compatible GPU found, using CPU");
+#else
+    ui->logTextEdit->appendPlainText("[CUDA] Not compiled in (CUDA toolkit not detected at build time)");
+#endif
 
 
     // start timers for performance tracking
@@ -404,6 +466,9 @@ MainWindow::~MainWindow()
         m_beamformerThread->quit();
         m_beamformerThread->wait();
         delete m_beamformerWorker;
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+        delete m_beamformerWorkerCUDA;
+#endif
     }
     if (m_oscThread) {
         m_oscThread->quit();
@@ -766,8 +831,6 @@ void MainWindow::finalizeFrameIfComplete(bool forceDrop)
         ++m_framesSinceLastScan;
         if (m_framesSinceLastScan >= m_scanIntervalFrames) {
             if (m_workerBusy) {
-                ui->logTextEdit->appendPlainText(
-                    "⚠️ Beamformer overrun: worker still busy, restarting accumulation");
                 m_framesSinceLastScan = 0;
                 // m_activeScanBuffer stays the same — worker owns the other slot
             } else {
@@ -1110,6 +1173,10 @@ bool MainWindow::loadGeometry(const QString &path)
     // Pass mic positions to the beamformer worker for the grid scan
     if (m_beamformerWorker)
         m_beamformerWorker->setMicPositions(m_micArray->xPositions(), m_micArray->yPositions());
+#ifdef BEAMFORMER_CUDA_AVAILABLE
+    if (m_beamformerWorkerCUDA)
+        m_beamformerWorkerCUDA->setMicPositions(m_micArray->xPositions(), m_micArray->yPositions());
+#endif
 
     m_geometryLoaded = true;
     ui->logTextEdit->appendPlainText(QString("✅ Geometry loaded: %1 microphones from %2").arg(m_micArray->count()).arg(path));

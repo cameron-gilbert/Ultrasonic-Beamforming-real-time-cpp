@@ -112,26 +112,35 @@ void OscilloscopeWorker::onNewHeatmap(QVector<float> powerGrid, int nx, int ny)
     emit imageReady(renderHeatmap(powerGrid, nx, ny));
 }
 
-// Hot colormap: black → red → yellow → white
+// Colormap: black → teal (background) → red → yellow → white (signal peak)
 static QRgb heatColor(float t)
 {
     if (t <= 0.0f) return qRgb(0, 0, 0);
     if (t >= 1.0f) return qRgb(255, 255, 255);
-    int r, g, b;
-    if (t < 1.0f / 3.0f) {
-        r = static_cast<int>(t * 3.0f * 255.0f);
-        g = 0;
-        b = 0;
-    } else if (t < 2.0f / 3.0f) {
-        r = 255;
-        g = static_cast<int>((t - 1.0f / 3.0f) * 3.0f * 255.0f);
-        b = 0;
+
+    if (t < 0.33f) {
+        // black → teal
+        const float s = t / 0.33f;
+        return qRgb(0,
+                    static_cast<int>(s * 180.0f),
+                    static_cast<int>(s * 180.0f));
+    } else if (t < 0.5f) {
+        // teal → red
+        const float s = (t - 0.33f) / 0.17f;
+        return qRgb(static_cast<int>(s * 255.0f),
+                    static_cast<int>((1.0f - s) * 180.0f),
+                    static_cast<int>((1.0f - s) * 180.0f));
+    } else if (t < 0.75f) {
+        // red → yellow
+        const float s = (t - 0.5f) / 0.25f;
+        return qRgb(255,
+                    static_cast<int>(s * 255.0f),
+                    0);
     } else {
-        r = 255;
-        g = 255;
-        b = static_cast<int>((t - 2.0f / 3.0f) * 3.0f * 255.0f);
+        // yellow → white
+        const float s = (t - 0.75f) / 0.25f;
+        return qRgb(255, 255, static_cast<int>(s * 255.0f));
     }
-    return qRgb(r, g, b);
 }
 
 QImage OscilloscopeWorker::renderHeatmap(const QVector<float>& powerGrid, int nx, int ny) const
@@ -149,8 +158,9 @@ QImage OscilloscopeWorker::renderHeatmap(const QVector<float>& powerGrid, int nx
         for (int iy = 0; iy < ny; ++iy) {
             const float power = powerGrid[ix * ny + iy];
             const float t = power / maxPower;
-            // Flip iy so that vy=+1 is at the top of the image
-            heatmapSmall.setPixel(ix, ny - 1 - iy, heatColor(t));
+            // Flip iy so that vy=+1 is at the top of the image.
+            // Flip ix so that vx=+1 is on the left (mirror for array-facing-viewer).
+            heatmapSmall.setPixel(nx - 1 - ix, ny - 1 - iy, heatColor(t));
         }
     }
 

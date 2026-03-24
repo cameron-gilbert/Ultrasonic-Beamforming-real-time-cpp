@@ -19,6 +19,7 @@ QT_END_NAMESPACE
 class IDataProvider;
 class TCPControl;
 class BeamformerWorker;
+class BeamformerWorkerCUDA;
 class AudioOutput;
 class MicrophoneArray;
 class BeamformingCalculator;
@@ -89,7 +90,9 @@ private:
     // Beamforming components
     MicrophoneArray *m_micArray = nullptr;
     BeamformingCalculator *m_beamCalc = nullptr;
-    BeamformerWorker *m_beamformerWorker = nullptr;
+    BeamformerWorker     *m_beamformerWorker     = nullptr;
+    BeamformerWorkerCUDA *m_beamformerWorkerCUDA = nullptr;
+    bool                  m_useCuda              = false;
     QThread *m_beamformerThread = nullptr;
     OscilloscopeWorker *m_oscWorker = nullptr;
     QThread *m_oscThread = nullptr;
